@@ -1,64 +1,76 @@
-#include "Blur.h"
+#include "include/blur.h"
+
 #include <algorithm>
 
-// За границей картинки берём ближайший пиксель (clamp).
-static inline int ClampI(int value, int lo, int hi)
+namespace
 {
-	if (value < lo)
+
+inline int Clamp(int v, int lo, int hi)
+{
+	if (v < lo)
 		return lo;
-	if (value > hi)
+	if (v > hi)
 		return hi;
-	return value;
+	return v;
 }
 
-// Box blur радиусом r: значение пикселя — среднее по квадрату (2r+1)x(2r+1).
-// Для простоты и корректности используем прямой проход (O(N * (2r+1)^2)).
-void BlurRect(const Image& src, Image& dst, Rect rect, int radius)
+} // namespace
+
+void BlurRect(const Image& src, Image& dst, Rect rc, int radius)
 {
 	const int W = src.width;
 	const int H = src.height;
 
-	// Ограничиваем прямоугольник размерами картинки
-	rect.x0 = std::clamp(rect.x0, 0, W);
-	rect.x1 = std::clamp(rect.x1, 0, W);
-	rect.y0 = std::clamp(rect.y0, 0, H);
-	rect.y1 = std::clamp(rect.y1, 0, H);
+	const int window = 2 * radius + 1;
+	const int area = window * window;
 
-	if (rect.x0 >= rect.x1 || rect.y0 >= rect.y1)
-		return;
-
-	const long long area = static_cast<long long>(2 * radius + 1) * (2 * radius + 1);
-
-	for (int y = rect.y0; y < rect.y1; ++y)
+	for (int y = rc.y0; y < rc.y1; ++y)
 	{
-		for (int x = rect.x0; x < rect.x1; ++x)
+		for (int x = rc.x0; x < rc.x1; ++x)
 		{
-			long long sumR = 0, sumG = 0, sumB = 0;
+			int sumR = 0, sumG = 0, sumB = 0;
+
 			for (int dy = -radius; dy <= radius; ++dy)
 			{
-				const int sy = ClampI(y + dy, 0, H - 1);
-				const uint8_t* row = src.at(0, sy);
+				const int yy = Clamp(y + dy, 0, H - 1);
 				for (int dx = -radius; dx <= radius; ++dx)
 				{
-					const int sx = ClampI(x + dx, 0, W - 1);
-					const uint8_t* p = row + static_cast<size_t>(sx) * 3;
-					sumR += p[0];
-					sumG += p[1];
-					sumB += p[2];
+					const int xx = Clamp(x + dx, 0, W - 1);
+					const std::uint8_t* srcPx = src.Pixel(xx, yy);
+					sumR += srcPx[0];
+					sumG += srcPx[1];
+					sumB += srcPx[2];
 				}
 			}
-			uint8_t* out = dst.at(x, y);
-			out[0] = static_cast<uint8_t>(sumR / area);
-			out[1] = static_cast<uint8_t>(sumG / area);
-			out[2] = static_cast<uint8_t>(sumB / area);
+
+			std::uint8_t* dstPx = dst.Pixel(x, y);
+			dstPx[0] = static_cast<std::uint8_t>(sumR / area);
+			dstPx[1] = static_cast<std::uint8_t>(sumG / area);
+			dstPx[2] = static_cast<std::uint8_t>(sumB / area);
 		}
 	}
 }
 
+std::vector<std::vector<Rect>> MakeWork(int width, int height, int threadCount)
+{
+	std::vector<std::vector<Rect>> work(threadCount);
+
+	for (int i = 0; i < threadCount; ++i)
+	{
+		// (k*h)/N … ((k+1)*h)/N — без потерь остатка, без наложений.
+		int y0 = (i * height) / threadCount;
+		int y1 = ((i + 1) * height) / threadCount;
+
+		Rect r{ 0, y0, width, y1 };
+		work[i].push_back(r);
+	}
+	return work;
+}
+
 void Worker(const Image& src, Image& dst, std::vector<Rect> rects, int radius)
 {
-	for (const Rect& r : rects)
+	for (const Rect& rc : rects)
 	{
-		BlurRect(src, dst, r, radius);
+		BlurRect(src, dst, rc, radius);
 	}
 }

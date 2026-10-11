@@ -1,107 +1,109 @@
-#include "Blur.h"
-#include "BmpIO.h"
-#include "Image.h"
-#include "WorkSplit.h"
+#include "include/blur.h"
+#include "include/image.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
-#include <iostream>
 #include <string>
 #include <thread>
 #include <vector>
 
-static void PrintUsage(const char* exe)
+namespace
 {
-	std::cerr << "Использование: " << exe
-			  << " <input.bmp> <output.bmp> <threads> [radius]\n"
-			  << "  threads — целое > 0, radius — целое >= 0 (по умолчанию 1)\n";
+
+void Usage(const char* argv0)
+{
+	std::fprintf(stderr,
+		"usage: %s <input.bmp> <output.bmp> <threads> [radius]\n"
+		"  threads : 1..1024\n"
+		"  radius  : 0..1024 (default 1)\n",
+		argv0);
 }
+
+bool ParseInt(const char* s, int lo, int hi, int& out)
+{
+	if (!s || !*s)
+		return false;
+	char* end = nullptr;
+	errno = 0;
+	long v = std::strtol(s, &end, 10);
+	if (errno != 0 || *end != '\0')
+		return false;
+	if (v < lo || v > hi)
+		return false;
+	out = static_cast<int>(v);
+	return true;
+}
+
+} // namespace
 
 int main(int argc, char** argv)
 {
 	if (argc < 4 || argc > 5)
 	{
-		PrintUsage(argv[0]);
+		Usage(argv[0]);
 		return 1;
 	}
-
-	const std::string inPath = argv[1];
-	const std::string outPath = argv[2];
 
 	int threadCount = 0;
+	if (!ParseInt(argv[3], 1, 1024, threadCount))
+	{
+		std::fprintf(stderr, "error: invalid <threads> '%s' (expected 1..1024)\n", argv[3]);
+		return 1;
+	}
+
 	int radius = 1;
-
-	try
+	if (argc == 5)
 	{
-		threadCount = std::stoi(argv[3]);
-		if (argc == 5)
-			radius = std::stoi(argv[4]);
-	}
-	catch (const std::exception&)
-	{
-		std::cerr << "Ошибка: threads и radius должны быть целыми числами.\n";
-		return 1;
-	}
-
-	if (threadCount <= 0)
-	{
-		std::cerr << "Ошибка: threads должно быть > 0.\n";
-		return 1;
-	}
-	if (radius < 0)
-	{
-		std::cerr << "Ошибка: radius должен быть >= 0.\n";
-		return 1;
+		if (!ParseInt(argv[4], 0, 1024, radius))
+		{
+			std::fprintf(stderr, "error: invalid [radius] '%s' (expected 0..1024)\n", argv[4]);
+			return 1;
+		}
 	}
 
 	Image src;
-	try
+	std::string err;
+	if (!LoadImage(argv[1], src, err))
 	{
-		src = LoadBMP(inPath);
-	}
-	catch (const std::exception& e)
-	{
-		std::cerr << "Ошибка чтения: " << e.what() << "\n";
+		std::fprintf(stderr, "error: %s\n", err.c_str());
 		return 1;
 	}
 
-	Image dst(src.width, src.height); // пустое изображение того же размера
-
+	Image dst = MakeEmpty(src.width, src.height);
 	auto work = MakeWork(src.width, src.height, threadCount);
 
-	// Замер только обработки: от запуска первого потока до завершения последнего.
-	const auto start = std::chrono::steady_clock::now();
+	// Замер: только обработка. Чтение и запись файла — вне замера.
+	const auto t0 = std::chrono::steady_clock::now();
 	{
 		std::vector<std::jthread> threads;
 		threads.reserve(threadCount);
-		for (int k = 0; k < threadCount; ++k)
+		for (int i = 0; k < threadCount; ++i)
 		{
-			threads.emplace_back(Worker,
+			threads.emplace_back(
+				Worker,
 				std::cref(src),
 				std::ref(dst),
-				std::move(work[k]),
+				std::move(work[i]),
 				radius);
 		}
-	} // деструкторы jthread делают join
-	const auto finish = std::chrono::steady_clock::now();
-
-	const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(finish - start).count();
-
-	try
-	{
-		SaveBMP(outPath, dst);
 	}
-	catch (const std::exception& e)
+	const auto t1 = std::chrono::steady_clock::now();
+
+	const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+	// Одна CSV-строка в stdout. Всё остальное — в stderr.
+	std::printf("%d,%d,%u,%lld\n",
+		threadCount,
+		radius,
+		std::thread::hardware_concurrency(),
+		static_cast<long long>(ms));
+
+	if (!SaveImage(argv[2], dst, err))
 	{
-		std::cerr << "Ошибка записи: " << e.what() << "\n";
+		std::fprintf(stderr, "error: %s\n", err.c_str());
 		return 1;
 	}
-
-	// Единственная строка в stdout: threads,radius,hardware_concurrency,ms
-	std::cout << threadCount << ','
-			  << radius << ','
-			  << std::thread::hardware_concurrency() << ','
-			  << ms << '\n';
 
 	return 0;
 }
